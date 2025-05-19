@@ -1,0 +1,196 @@
+- name: Default Configuration
+  hosts:
+    - all
+  tasks:
+    - name: Update System
+      ansible.builtin.apt:
+        update_cache: true
+        force_apt_get: true
+        cache_valid_time: 3600
+
+    - name: Install Default Packages
+      ansible.builtin.apt:
+        name: '{{ item }}'
+        state: present
+      loop:
+        - postgresql
+        - python3-psycopg2
+        - acl
+        - redis-server
+        - python3 
+        - python3-pip 
+        - python3-venv 
+        - python3-dev
+        - build-essential
+        - libxml2-dev
+        - libxslt1-dev
+        - libffi-dev
+        - libpq-dev
+        - libssl-dev
+        - zlib1g-dev
+        - git
+        - nginx
+
+- name: Postgresql
+  hosts:
+    - all
+  vars_files:
+    - vars.yaml
+  become: true 
+  become_user: postgres
+  tasks:
+    - name: Create Database Username and Password
+      community.postgresql.postgresql_user:
+        name: '{{postgresql.db_user}}'
+        password: '{{postgresql.db_password}}'
+
+    - name: Create Database
+      community.postgresql.postgresql_db:
+        name: '{{postgresql.db_name}}'
+        owner: '{{postgresql.db_user}}'
+        encoding: UTF8
+
+    - name: Database Permission
+      community.postgresql.postgresql_privs:
+        db: '{{postgresql.db_name}}'
+        role: '{{postgresql.db_user}}'
+        type: schema
+        objs: public
+        privs: CREATE
+
+- name: Netbox
+  hosts:
+    - all
+  vars_files:
+    - vars.yaml
+  become: true 
+  tasks:
+    - name: Clone Repository
+      ansible.builtin.git:
+        repo: https://github.com/netbox-community/netbox.git
+        dest: /opt/netbox
+        version: v4.3.1
+    
+    - name: Create Group
+      ansible.builtin.group:
+        name: netbox
+        system: yes
+    
+    - name: Create User
+      ansible.builtin.user:
+        name: netbox
+        system: yes
+        group: netbox
+        create_home: no
+
+    - name: Configure Permissions
+      ansible.builtin.file:
+        path:
+          - /opt/netbox/netbox/reports
+          - /opt/netbox/netbox/media
+          - /opt/netbox/netbox/scripts
+        owner: netbox
+        recurse: yes
+
+    - name: Copy Configuration File
+      ansible.builtin.copy:
+        src: /opt/netbox/netbox/netbox/configuration_example.py
+        dest: /opt/netbox/netbox/netbox/configuration.py
+        remote_src: yes
+        
+    - name: Generate SECRET_KEY for NetBox
+      ansible.builtin.command: python3 /opt/netbox/netbox/generate_secret_key.py
+      register: netbox_secret_key
+
+    - name: Modify Configuration File
+      ansible.builtin.replace:
+        path: /opt/netbox/netbox/netbox/configuration.py
+        after: '{{item.after}}'
+        before: '{{item.before}}'
+        regexp: '{{item.regexp}}'
+        replace: '{{item.replace}}'
+      loop:
+        - { regexp: "ALLOWED_HOSTS = \\[\\]", replace: "ALLOWED_HOSTS = ['*']", after: "", before: ""}
+        - { regexp: "'USER': ''", replace: "'USER': 'netbox'", after: "DATABASES = {", before: "}"}
+        - { regexp: "'PASSWORD': ''", replace: "'PASSWORD': 'J5brHrAXFLQSif0K'", after: "DATABASES = {", before: "}"}
+        - { regexp: "SECRET_KEY = ''", replace: "SECRET_KEY = '{{ netbox_secret_key.stdout }}'", after: "", before: ""}
+
+    - name: Update Script
+      ansible.builtin.command: /opt/netbox/upgrade.sh
+      register: output
+      changed_when: output.rc != 0
+
+    - name: Create a Super User
+      community.general.django_manage:
+        virtualenv: /opt/netbox/venv
+        project_path: /opt/netbox/netbox
+        command: createsuperuser --noinput
+        ack_venv_creation_deprecation: true
+      environment:
+        DJANGO_SUPERUSER_USERNAME: '{{netbox.user}}'
+        DJANGO_SUPERUSER_PASSWORD: '{{netbox.password}}'
+        DJANGO_SUPERUSER_EMAIL: '{{netbox.email}}'
+
+- name: Gunicorn
+  hosts:
+    - all
+  become: true 
+  tasks:
+    - name: Copy Configuration File
+      ansible.builtin.copy:
+        src: /opt/netbox/contrib/gunicorn.py
+        dest: /opt/netbox/gunicorn.py
+        remote_src: yes
+
+    - name: Find .service Files
+      ansible.builtin.find:
+        paths: /opt/netbox/contrib/
+        patterns: "*.service"
+      register: service_files
+
+    - name: Copy .service Files
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: /etc/systemd/system/
+        remote_src: yes
+      loop: "{{ service_files.files }}"
+
+    - name: Reload the System
+      ansible.builtin.shell: |
+        systemctl daemon-reload
+        systemctl enable --now netbox netbox-rq
+
+- name: Nginx
+  hosts:
+    - all
+  become: true 
+  tasks:
+    - name: Copy Configuration File
+      ansible.builtin.copy:
+        src: /opt/netbox/contrib/nginx.conf
+        dest: /etc/nginx/sites-available/netbox
+        remote_src: yes
+
+    - name: Modify Configuration File
+      ansible.builtin.replace:
+        path: /etc/nginx/sites-available/netbox
+        regexp: '{{item.regexp}}'
+        after: '{{item.after}}'
+        replace: '{{item.replace}}'
+      loop:
+        - { regexp: 'server\s*\{[^}]*\}\s*$', replace: '', after: 'server {' }
+        - { regexp: '^\s*ssl_certificate\s+/etc/ssl/certs/netbox\.crt;\n^\s*ssl_certificate_key\s+/etc/ssl/private/netbox\.key;', replace: '', after: '' }
+        - { regexp: '^(\s*)listen\s.*$', replace: '\1listen [::]:80 ipv6only=off;', after: '' }
+        - { regexp: '^(\s*)server_name\s+netbox\.example\.com;', replace: '\1server_name _;', after: '' }
+
+    - name: Remove Default File and Create a Link to Netbox File
+      ansible.builtin.shell: |
+        rm /etc/nginx/sites-enabled/default
+        ln -s /etc/nginx/sites-available/netbox /etc/nginx/sites-enabled/netbox
+
+    - name: Restart Service
+      ansible.builtin.systemd_service:
+        state: restarted
+        name: nginx
+        enabled: true
+        daemon_reload: true
