@@ -5,16 +5,17 @@ Vagrant.configure("2") do |config|
         netbox.vm.hostname = "netbox"
         
         netbox.vm.network "public_network", 
-            ip: "192.168.31.200",
+            ip: "10.90.0.200",
             netmask: "255.255.255.0",
-            bridge: "wlp0s20f3",
+            bridge: "enp2s0f0",
             use_dhcp_assigned_default_route: true
 
         netbox.vm.provider "virtualbox" do |vb|
-            vb.cpus = 2
-            vb.memory = 4096
+            vb.cpus = 4
+            vb.memory = 8192
             vb.name = "netbox"
         end
+
     end
 
 end

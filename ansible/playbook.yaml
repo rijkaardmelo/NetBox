@@ -30,6 +30,33 @@
         - zlib1g-dev
         - git
         - nginx
+        - curl
+        - xxd
+        - uidmap
+        - vim
+        - jq
+
+- name: Install Docker
+  hosts:
+    - all
+  tasks:
+    - name: Download Docker Configuration File
+      ansible.builtin.get_url:
+        url: https://get.docker.com
+        dest: /tmp/get-docker.sh
+        mode: '755'
+
+    - name: Install Docker
+      ansible.builtin.command: /tmp/get-docker.sh
+      register: output
+      changed_when: output.rc != 0
+
+    - name: Configure Docker with Privileges Disabled
+      ansible.builtin.command: dockerd-rootless-setuptool.sh install
+      become: true
+      become_user: vagrant
+      register: output
+      changed_when: output.rc != 0
 
 - name: Postgresql
   hosts:
@@ -52,7 +79,7 @@
 
     - name: Database Permission
       community.postgresql.postgresql_privs:
-        db: '{{postgresql.db_name}}'
+        login_db: '{{postgresql.db_name}}'
         role: '{{postgresql.db_user}}'
         type: schema
         objs: public
@@ -69,7 +96,7 @@
       ansible.builtin.git:
         repo: https://github.com/netbox-community/netbox.git
         dest: /opt/netbox
-        version: v4.3.1
+        version: '{{netbox.version}}'
     
     - name: Create Group
       ansible.builtin.group:
@@ -111,8 +138,8 @@
         replace: '{{item.replace}}'
       loop:
         - { regexp: "ALLOWED_HOSTS = \\[\\]", replace: "ALLOWED_HOSTS = ['*']", after: "", before: ""}
-        - { regexp: "'USER': ''", replace: "'USER': 'netbox'", after: "DATABASES = {", before: "}"}
-        - { regexp: "'PASSWORD': ''", replace: "'PASSWORD': 'J5brHrAXFLQSif0K'", after: "DATABASES = {", before: "}"}
+        - { regexp: "'USER': ''", replace: "'USER': '{{postgresql.db_user}}'", after: "DATABASES = {", before: "}"}
+        - { regexp: "'PASSWORD': ''", replace: "'PASSWORD': '{{postgresql.db_password}}'", after: "DATABASES = {", before: "}"}
         - { regexp: "SECRET_KEY = ''", replace: "SECRET_KEY = '{{ netbox_secret_key.stdout }}'", after: "", before: ""}
 
     - name: Update Script
